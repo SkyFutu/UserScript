@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili PCDN Blocker
 // @namespace    https://github.com/SkyFutu/UserScript
-// @version      1.0.0
+// @version      1.0.1
 // @author       Sky
 // @description  屏蔽B站PCDN并直连官方CDN加载
 // @license      MIT
@@ -210,10 +210,12 @@
       _neptune = val;
     }
   });
+  const isVideoApi = (url) => url.includes("api.bilibili.com/x/player/wbi/playurl") || url.includes("api.bilibili.com/pgc/player/web/v2/playurl") || url.includes("api.bilibili.com/x/player/wbi/v2");
+  const isLiveApi = (url) => url.includes("api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo");
   const origOpen = win.XMLHttpRequest.prototype.open;
   win.XMLHttpRequest.prototype.open = function(method, url, ...args) {
     if (typeof url === "string") {
-      if (url.includes("api.bilibili.com/x/player/wbi/playurl") || url.includes("api.bilibili.com/pgc/player/web/v2/playurl")) {
+      if (isVideoApi(url)) {
         const getter = Object.getOwnPropertyDescriptor(win.XMLHttpRequest.prototype, "responseText")?.get;
         if (getter) {
           Object.defineProperty(this, "responseText", {
@@ -230,7 +232,7 @@
             }
           });
         }
-      } else if (url.includes("api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo")) {
+      } else if (isLiveApi(url)) {
         const getter = Object.getOwnPropertyDescriptor(win.XMLHttpRequest.prototype, "responseText")?.get;
         if (getter) {
           Object.defineProperty(this, "responseText", {
@@ -255,19 +257,35 @@
   win.fetch = async function(...args) {
     const url = args[0];
     const response = await origFetch.apply(this, args);
-    if (typeof url === "string" && url.includes("api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo")) {
-      const clonedRes = response.clone();
-      try {
-        const json = await clonedRes.json();
-        cleanLivePlayInfo(json?.data?.playurl_info?.playurl);
-        return new Response(JSON.stringify(json), {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers
-        });
-      } catch (e) {
-        logger.withtag("Live").error("解析直播 Fetch 响应失败", e);
-        return response;
+    if (typeof url === "string") {
+      if (isVideoApi(url)) {
+        const clonedRes = response.clone();
+        try {
+          const json = await clonedRes.json();
+          cleanVideoPlayInfo(json?.data || json?.result);
+          return new Response(JSON.stringify(json), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        } catch (e) {
+          logger.withtag("Video").error("解析视频 Fetch 响应失败", e);
+          return response;
+        }
+      } else if (isLiveApi(url)) {
+        const clonedRes = response.clone();
+        try {
+          const json = await clonedRes.json();
+          cleanLivePlayInfo(json?.data?.playurl_info?.playurl);
+          return new Response(JSON.stringify(json), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        } catch (e) {
+          logger.withtag("Live").error("解析直播 Fetch 响应失败", e);
+          return response;
+        }
       }
     }
     return response;
