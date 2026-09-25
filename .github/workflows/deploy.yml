@@ -1,0 +1,40 @@
+name: Auto Build and Deploy Scripts
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'latest'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Dependencies and Build
+        run: |
+          pnpm install
+          pnpm run build
+
+      - name: Extract .user.js to Dist Folder
+        run: |
+          mkdir -p final_dist
+          find scripts -name "*.user.js" -exec cp {} final_dist/ \;
+
+      - name: Deploy to Build Branch
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: final_dist 
+          branch: build 
+          clean: true
