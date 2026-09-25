@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "lib": ["ESNext"],
+    "types": ["node"]
+  },
+    "paths": {
+      "vite": ["./node_modules/vite"],
+      "vite-plugin-monkey": ["./node_modules/vite-plugin-monkey"]}
+}
