@@ -3,7 +3,7 @@ import { createMonkeyConfig } from '../../vite.base.config';
 // 现在只需传一个对象，name 也写在这里面
 export default createMonkeyConfig({
   name: 'Bilibili PCDN Blocker', 
-  version: '1.0.0',
+  version: '1.0.1',
   description: '屏蔽B站PCDN并直连官方CDN加载',
   icon: 'https://static.hdslb.com/images/favicon.ico',
   match: [
