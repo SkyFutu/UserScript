@@ -48,7 +48,7 @@ Tampermonkey 为了顺应 Chrome 的 Manifest V3 要求，在 v5.0.0 版本中�
 
 ## 💖 鸣谢
 - **README** 模板由 [XIU2/UserScript](https://github.com/XIU2/UserScript) 提供
-- **Bilibili PCDN Blocker** 重构于 [AkagiYui/UserScript](https://github.com/AkagiYui/UserScript) **【哔哩哔哩】屏蔽视频PCDN地址**
+- **Bilibili PCDN Blocker** 灵感来源于 [AkagiYui/UserScript](https://github.com/AkagiYui/UserScript) **【哔哩哔哩】屏蔽视频PCDN地址**
 
 ****
 

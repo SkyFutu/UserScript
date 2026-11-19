@@ -2,131 +2,112 @@ import { unsafeWindow } from '$';
 import { registerMenus } from './utils/menu';
 import { cleanVideoPlayInfo } from './core/video';
 import { cleanLivePlayInfo } from './core/live';
-import { printStartupBadge, createLogger } from './utils/logger';
+import { printStartupBadge } from './utils/logger';
 
-const logger = createLogger();
 const win = unsafeWindow as any;
 
 if (win.self === win.top) {
-    printStartupBadge(); 
+    printStartupBadge();
 }
 registerMenus();
 
-// 1. 拦截页面初始化的全局变量
+// Hook: __playinfo__
 let _playinfo = win.__playinfo__;
-if (_playinfo) {
-    cleanVideoPlayInfo(_playinfo?.data || _playinfo?.result);
-}
-
-Object.defineProperty(win, "__playinfo__", {
+if (_playinfo) cleanVideoPlayInfo(_playinfo);
+Object.defineProperty(win, '__playinfo__', {
     get: () => _playinfo,
     set: (val) => {
-        cleanVideoPlayInfo(val?.data || val?.result);
+        cleanVideoPlayInfo(val);
         _playinfo = val;
     }
 });
 
+// Hook: __NEPTUNE_IS_MY_WAIFU__
 let _neptune = win.__NEPTUNE_IS_MY_WAIFU__;
-if (_neptune) {
-    cleanLivePlayInfo(_neptune?.roomInitRes?.data?.playurl_info?.playurl);
-}
-Object.defineProperty(win, "__NEPTUNE_IS_MY_WAIFU__", {
+if (_neptune) cleanLivePlayInfo(_neptune);
+Object.defineProperty(win, '__NEPTUNE_IS_MY_WAIFU__', {
     get: () => _neptune,
     set: (val) => {
-        cleanLivePlayInfo(val?.roomInitRes?.data?.playurl_info?.playurl);
+        cleanLivePlayInfo(val);
         _neptune = val;
     }
 });
 
-// 定义需要拦截的视频接口
-const isVideoApi = (url: string) => 
-    url.includes("api.bilibili.com/x/player/wbi/playurl") || 
-    url.includes("api.bilibili.com/pgc/player/web/v2/playurl") ||
-    url.includes("api.bilibili.com/x/player/wbi/v2"); // v2 接口
+function cleanJsonString(str: string, cleanFn: (data: any) => void): string {
+    try {
+        const json = JSON.parse(str);
+        cleanFn(json);
+        return JSON.stringify(json);
+    } catch {
+        return str;
+    }
+}
 
-const isLiveApi = (url: string) => 
-    url.includes("api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo");
+// Hook: XHR
+const responseGetter = Object.getOwnPropertyDescriptor(win.XMLHttpRequest.prototype, 'response')?.get;
+const textGetter = Object.getOwnPropertyDescriptor(win.XMLHttpRequest.prototype, 'responseText')?.get;
 
-// 2. 拦截 XHR 请求
-const origOpen = win.XMLHttpRequest.prototype.open;
-win.XMLHttpRequest.prototype.open = function(method: string, url: string, ...args: any[]) {
-    if (typeof url === 'string') {
-        if (isVideoApi(url)) {
-            const getter = Object.getOwnPropertyDescriptor(win.XMLHttpRequest.prototype, "responseText")?.get;
-            if (getter) {
-                Object.defineProperty(this, "responseText", {
-                    get: () => {
-                        const res = getter.call(this);
-                        try {
-                            const json = JSON.parse(res);
-                            cleanVideoPlayInfo(json.data || json.result);
-                            return JSON.stringify(json);
-                        } catch (e) {
-                            logger.withtag('Video').error("解析视频 XHR 响应失败", e);
-                            return res; 
-                        }
-                    }
-                });
+function hookXhr(xhr: XMLHttpRequest, cleanFn: (data: any) => void) {
+    if (responseGetter) {
+        Object.defineProperty(xhr, 'response', {
+            get: () => {
+                const res = responseGetter.call(xhr);
+                if (xhr.responseType === 'json' && res && typeof res === 'object') {
+                    cleanFn(res);
+                    return res;
+                }
+                return typeof res === 'string' ? cleanJsonString(res, cleanFn) : res;
             }
-        } else if (isLiveApi(url)) {
-             const getter = Object.getOwnPropertyDescriptor(win.XMLHttpRequest.prototype, "responseText")?.get;
-             if (getter) {
-                 Object.defineProperty(this, "responseText", {
-                     get: () => {
-                         const res = getter.call(this);
-                         try {
-                             const json = JSON.parse(res);
-                             cleanLivePlayInfo(json?.data?.playurl_info?.playurl);
-                             return JSON.stringify(json);
-                         } catch (e) {
-                             logger.withtag('Live').error("解析直播 XHR 响应失败", e);
-                             return res;
-                         }
-                     }
-                 });
-             }
-        }
+        });
+    }
+
+    if (textGetter) {
+        Object.defineProperty(xhr, 'responseText', {
+            get: () => {
+                if (xhr.responseType && xhr.responseType !== 'text') {
+                    return textGetter.call(xhr);
+                }
+                return cleanJsonString(textGetter.call(xhr), cleanFn);
+            }
+        });
+    }
+}
+
+const origOpen = win.XMLHttpRequest.prototype.open;
+win.XMLHttpRequest.prototype.open = function(method: string, url: string | URL, ...args: any[]) {
+    const urlStr = String(url);
+    if (urlStr.includes('/playurl')) {
+        hookXhr(this, cleanVideoPlayInfo);
+    } else if (urlStr.includes('/getRoomPlayInfo')) {
+        hookXhr(this, cleanLivePlayInfo);
     }
     return origOpen.call(this, method, url, ...args);
 };
 
-// 3. 拦截 Fetch 请求
+// Hook: Fetch
 const origFetch = win.fetch;
 win.fetch = async function(...args: any[]) {
-    const url = args[0];
+    const rawUrl = args[0];
+    const urlStr = String(rawUrl instanceof Request ? rawUrl.url : rawUrl);
     const response = await origFetch.apply(this, args);
-    
-    if (typeof url === 'string') {
-        // 拦截视频 Fetch 请求
-        if (isVideoApi(url)) {
-            const clonedRes = response.clone();
-            try {
-                const json = await clonedRes.json();
-                cleanVideoPlayInfo(json?.data || json?.result);
-                return new Response(JSON.stringify(json), {
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: response.headers
-                });
-            } catch (e) {
-                logger.withtag('Video').error("解析视频 Fetch 响应失败", e);
-                return response;
-            }
-        } else if (isLiveApi(url)) {
-            const clonedRes = response.clone();
-            try {
-                const json = await clonedRes.json();
-                cleanLivePlayInfo(json?.data?.playurl_info?.playurl);
-                return new Response(JSON.stringify(json), {
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: response.headers
-                });
-            } catch (e) {
-                logger.withtag('Live').error("解析直播 Fetch 响应失败", e);
-                return response;
-            }
+
+    const isVideo = urlStr.includes('/playurl');
+    const isLive = urlStr.includes('/getRoomPlayInfo');
+
+    if (isVideo || isLive) {
+        const clonedRes = response.clone();
+        try {
+            const json = await clonedRes.json();
+            (isVideo ? cleanVideoPlayInfo : cleanLivePlayInfo)(json);
+            return new Response(JSON.stringify(json), {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers
+            });
+        } catch {
+            return response;
         }
     }
+
     return response;
 };

@@ -1,73 +1,115 @@
 import { getConfig } from '../utils/menu';
 import { createLogger } from '../utils/logger';
+import { PCDN_PATTERN, BCACHE_PATTERN } from '../constants';
 
 const logger = createLogger('Video');
-const PCDN_PATTERN = /(mcdn\.bilivideo\.(com|cn)|edge\.mountaintoys\.cn)/;
-const BCACHE_PATTERN = /(cn-.*\.bilivideo\.(com|cn))/;
 
-function filterUrls(urls: string[]): { baseUrl: string, backupUrls: string[] } {
-    let restUrls = urls.filter(url => !PCDN_PATTERN.test(url));
-
-    if (getConfig("blockBCacheCDN")) {
-        restUrls = restUrls.filter(url => !BCACHE_PATTERN.test(url));
-    }
-
-    return { baseUrl: restUrls[0], backupUrls: restUrls.slice(1) };
+export interface VideoMediaItem {
+    id: number;
+    codecid?: number;
+    codecs?: string;
+    bandwidth?: number;
+    baseUrl?: string;
+    base_url?: string;
+    backupUrl?: string[];
+    backup_url?: string[];
 }
 
-export function cleanVideoPlayInfo(data: any) {
-    if (!data) return;
+export interface CleanedTrack {
+    type: 'video' | 'audio';
+    quality: string;
+    codec: string;
+    cdn: string;
+}
 
-    logger.debug("视频列表 fetch 处理前", JSON.parse(JSON.stringify(data)));
-    
-    let count = 0;
-    const videoHosts = new Set<string>();
-    const audioHosts = new Set<string>();
+function filterCandidateUrls(allUrls: string[]): { primary: string; backups: string[] } {
+    let cleanUrls = allUrls.filter(url => !PCDN_PATTERN.test(url));
 
-    const extractHost = (urlStr: string) => {
-        try { return new URL(urlStr).host; } catch { return urlStr; }
-    };
+    if (getConfig('blockBCacheCDN')) {
+        const withoutBcache = cleanUrls.filter(url => !BCACHE_PATTERN.test(url));
+        if (withoutBcache.length > 0) cleanUrls = withoutBcache;
+    }
 
-    // 💡 targetBasket 现在的类型是 Set string
-    const cleanMedia = (media: any, targetBasket: Set<string>) => {
-            if (!media) return;
-            const allUrls = [media.baseUrl || media.base_url, ...(media.backupUrl || media.backup_url || [])].filter(Boolean);
-            if (allUrls.length === 0) return;
-            
-            const { baseUrl, backupUrls } = filterUrls(allUrls);
-            
-            media.baseUrl = media.base_url = baseUrl;
-            media.backupUrl = media.backup_url = backupUrls;
-            
-            if (baseUrl) {
-                targetBasket.add(extractHost(baseUrl));
-                if (backupUrls.length > 0) {
-                    backupUrls.forEach(url => targetBasket.add(extractHost(url)));
-                }
-                count++;
-            }
-        };
+    let primary = cleanUrls[0];
+    const backups = cleanUrls.slice(1);
 
-    const dash = data.dash || data.video_info?.dash;
+    if (!primary && getConfig('fallbackIfAllPCDN')) {
+        primary = allUrls[0];
+    }
+
+    return { primary: primary ?? '', backups };
+}
+
+function cleanMediaItem(
+    media: VideoMediaItem,
+    type: 'video' | 'audio',
+    formatMap: Map<number, string>,
+    cleanedTracks: CleanedTrack[]
+): void {
+    const primary = media.baseUrl ?? media.base_url;
+    const backups = media.backupUrl ?? media.backup_url ?? [];
+    const allUrls = primary ? [primary, ...backups] : backups;
+    if (allUrls.length === 0) return;
+
+    const { primary: chosenUrl, backups: cleanBackups } = filterCandidateUrls(allUrls);
+
+    media.baseUrl = media.base_url = chosenUrl;
+    media.backupUrl = media.backup_url = cleanBackups;
+
+    const spec = type === 'video'
+        ? (formatMap.get(media.id) ?? `${media.id}P`)
+        : (media.bandwidth ? `${Math.round(media.bandwidth / 1000)} kbps` : String(media.id));
+
+    const codec = media.codecs?.split('.')[0] ?? String(media.codecid ?? '-');
+
+    cleanedTracks.push({
+        type,
+        quality: spec,
+        codec,
+        cdn: chosenUrl ? new URL(chosenUrl).host : ''
+    });
+}
+
+function getPlayUrlBody(data: any): any {
+    return data?.result?.video_info ?? data?.data ?? data;
+}
+
+export function cleanVideoPlayInfo(raw: any): void {
+    const body = getPlayUrlBody(raw);
+    if (!body) return;
+
+    const cleanedTracks: CleanedTrack[] = [];
+    const dash = body.dash;
+
     if (dash) {
-        dash.video?.forEach((m: any) => cleanMedia(m, videoHosts));
-        dash.audio?.forEach((m: any) => cleanMedia(m, audioHosts));
-        dash.dolby?.audio?.forEach((m: any) => cleanMedia(m, audioHosts));
-        if (dash.flac?.audio) cleanMedia(dash.flac.audio, audioHosts);
+        const formatMap = new Map<number, string>(
+            (body.support_formats ?? []).map((f: any) => [f.quality, f.new_description])
+        );
+
+        dash.video?.forEach((v: VideoMediaItem) => cleanMediaItem(v, 'video', formatMap, cleanedTracks));
+        dash.audio?.forEach((a: VideoMediaItem) => cleanMediaItem(a, 'audio', formatMap, cleanedTracks));
+
+        if (dash.dolby?.audio) {
+            const dolbys = Array.isArray(dash.dolby.audio) ? dash.dolby.audio : [dash.dolby.audio];
+            dolbys.forEach((d: VideoMediaItem) => cleanMediaItem(d, 'audio', formatMap, cleanedTracks));
+        }
+
+        if (dash.flac?.audio) {
+            cleanMediaItem(dash.flac.audio, 'audio', formatMap, cleanedTracks);
+        }
     }
 
-    const durlGroup = data.durl || data.video_info?.durl || data.video_info?.durls;
-    if (Array.isArray(durlGroup)) {
-        durlGroup.forEach((item: any) => {
-            if (item.durl) item.durl.forEach((m: any) => cleanMedia(m, videoHosts));
-            else cleanMedia(item, videoHosts);
+    if (Array.isArray(body.durl)) {
+        body.durl.forEach((seg: any) => {
+            const allUrls = seg.url ? [seg.url, ...(seg.backup_url ?? [])] : (seg.backup_url ?? []);
+            if (allUrls.length === 0) return;
+            const { primary, backups } = filterCandidateUrls(allUrls);
+            seg.url = primary;
+            seg.backup_url = backups;
         });
     }
 
-    if (count > 0) {
-        logger.log(`${count} 条音视频轨道并使用以下节点分发`, {   
-            Audio: [...audioHosts],   
-            Video: [...videoHosts], 
-        });
+    if (cleanedTracks.length > 0) {
+        logger.debug(`处理音视频轨 (${cleanedTracks.length})`, cleanedTracks);
     }
 }

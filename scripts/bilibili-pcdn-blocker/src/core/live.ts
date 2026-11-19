@@ -2,39 +2,86 @@ import { getConfig } from '../utils/menu';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('Live');
-const LIVE_PCDN_PATTERN = /(mcdn\.bilivideo\.(com|cn))/;
 
-export function cleanLivePlayInfo(playurlInfo: any) {
-    if (!playurlInfo || !getConfig("blockLivePCDN")) return;
-    
-    logger.debug("直播列表 fetch 处理前", JSON.parse(JSON.stringify(playurlInfo)));
+export interface LivePlayUrl {
+    cid?: number;
+    g_qn_desc?: Array<{
+        qn: number;
+        desc: string;
+    }>;
+    p2p_data?: {
+        p2p: boolean;
+        p2p_type: number;
+    };
+    stream?: Array<{
+        protocol_name: string;
+        format?: Array<{
+            format_name: string;
+            master_url?: string;
+            codec?: Array<{
+                codec_name: string;
+                current_qn: number;
+                base_url: string;
+                url_info?: Array<{
+                    host: string;
+                    extra: string;
+                }>;
+            }>;
+        }>;
+    }>;
+}
 
-    let count = 0;
-    const collectedHosts = new Set<string>();
+export interface CleanedLiveStream {
+    protocol: string;
+    format: string;
+    codec: string;
+    quality: string;
+    cdn: string;
+}
 
-    if (playurlInfo.p2p_data) {
-        playurlInfo.p2p_data.p2p = false;
-        playurlInfo.p2p_data.p2p_type = 0;
-        // playurlInfo.p2p_data.m_p2p = false;
-        // playurlInfo.p2p_data.m_servers = null;
+function getLivePlayUrl(raw: any): LivePlayUrl | undefined {
+    return raw?.roomInitRes?.data?.playurl_info?.playurl ??
+           raw?.data?.playurl_info?.playurl;
+}
+
+export function cleanLivePlayInfo(raw?: any): void {
+    if (!getConfig('blockLivePCDN')) return;
+
+    const playurl = getLivePlayUrl(raw);
+    if (!playurl?.stream) return;
+
+    if (playurl.p2p_data) {
+        playurl.p2p_data.p2p = false;
+        playurl.p2p_data.p2p_type = -1;
     }
 
-    playurlInfo.stream?.forEach((stream: any) => {
-        stream.format?.forEach((format: any) => {
-            format.codec?.forEach((codec: any) => {
-                if (codec.url_info) {
-                    codec.url_info = codec.url_info.filter((info: any) => !LIVE_PCDN_PATTERN.test(info.host));
-                    
-                    if (codec.url_info.length > 0) {
-                        codec.url_info.forEach((info: any) => collectedHosts.add(info.host));
-                        count++;
-                    }
-                }
+    const qnMap = new Map<number, string>(
+        (playurl.g_qn_desc ?? []).map((item) => [item.qn, item.desc])
+    );
+
+    const streams: CleanedLiveStream[] = [];
+
+    playurl.stream.forEach((stream) => {
+        stream.format?.forEach((format) => {
+            if (format.master_url) {
+                format.master_url = format.master_url.replace(/([?&]p2p_type=)\d+/, '$1-1');
+            }
+            format.codec?.forEach((codec) => {
+                codec.url_info?.forEach((info) => {
+                    info.extra = info.extra.replace(/([?&]p2p_type=)\d+/, '$1-1');
+                });
+                streams.push({
+                    protocol: stream.protocol_name,
+                    format: format.format_name,
+                    codec: codec.codec_name,
+                    quality: qnMap.get(codec.current_qn) ?? `${codec.current_qn}P`,
+                    cdn: codec.url_info?.[0]?.host ?? ''
+                });
             });
         });
     });
 
-    if (count > 0) {
-        logger.log(`${count} 条直播流并使用以下节点分发`, [...collectedHosts]);
+    if (streams.length > 0) {
+        logger.debug(`处理直播流 (${streams.length})`, streams);
     }
 }
